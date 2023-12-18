@@ -44,6 +44,8 @@ class SelfOOD(pl.LightningModule):
         )
         self.mlp = MLP(self.embed_dim, self.embed_dim, prototype_dim,
                        num_hidden_layers=2, dropout_rate=dropout_rate)
+        self.mlp_temp = MLP(self.embed_dim, self.embed_dim, 1,
+                             num_hidden_layers=2, dropout_rate=dropout_rate)
         self.prototypes = nn.Parameter(torch.zeros(num_prototypes, prototype_dim))
         nn.init.uniform_(self.prototypes, -(1. / prototype_dim) ** 0.5, (1. / prototype_dim) ** 0.5)
 
@@ -80,9 +82,11 @@ class SelfOOD(pl.LightningModule):
         self.sinkhorn_queue_2 = torch.zeros(queue_size, self.num_prototypes, device=self.device)
 
     def to_logits(self, images):
-        embeds = F.normalize(self.mlp(self.encoder(images)), dim=-1)  # (n, pd)
+        encoder_output = self.encoder(images)
+        embeds = F.normalize(self.mlp(encoder_output), dim=-1)  # (n, pd)
+        kappa = torch.exp(self.mlp_temp(encoder_output))
         prototypes = F.normalize(self.prototypes, dim=-1)  # (np, pd)
-        return torch.matmul(embeds, prototypes.T) / self.temp  # (n, np)
+        return torch.matmul(embeds, prototypes.T) / kappa # (n, np)
 
     def training_step(self, batch, batch_idx):
         (_, views_1, views_2), _ = batch
