@@ -44,6 +44,10 @@ class SelfOOD(pl.LightningModule):
         )
         self.mlp = MLP(self.embed_dim, self.embed_dim, prototype_dim,
                        num_hidden_layers=2, dropout_rate=dropout_rate)
+        
+        self.mlp_temp = MLP(self.embed_dim, self.embed_dim, 1,
+                            num_hidden_layers=2, dropout_rate=dropout_rate)
+
         self.prototypes = nn.Parameter(torch.zeros(num_prototypes, prototype_dim))
         nn.init.uniform_(self.prototypes, -(1. / prototype_dim) ** 0.5, (1. / prototype_dim) ** 0.5)
 
@@ -80,15 +84,17 @@ class SelfOOD(pl.LightningModule):
         self.sinkhorn_queue_2 = torch.zeros(queue_size, self.num_prototypes, device=self.device)
 
     def to_logits(self, images):
-        embeds = F.normalize(self.mlp(self.encoder(images)), dim=-1)  # (n, pd)
+        encoder_output = self.encoder(images)
+        embeds = F.normalize(self.mlp(encoder_output), dim=-1)  # (n, pd)
+        kappa = torch.exp(self.mlp_temp(encoder_output))
         prototypes = F.normalize(self.prototypes, dim=-1)  # (np, pd)
-        return torch.matmul(embeds, prototypes.T) / self.temp  # (n, np)
+        return (torch.matmul(embeds, prototypes.T) / kappa, kappa) # (n, np)
 
     def training_step(self, batch, batch_idx):
         (_, views_1, views_2), _ = batch
 
-        logits_1 = self.to_logits(views_1)
-        logits_2 = self.to_logits(views_2)
+        logits_1, kappa_1 = self.to_logits(views_1)
+        logits_2, kappa_2 = self.to_logits(views_2)
 
         targets_1 = torch.softmax(logits_1.detach() / self.sharpen_temp, dim=-1)
         targets_2 = torch.softmax(logits_2.detach() / self.sharpen_temp, dim=-1)
@@ -131,13 +137,13 @@ class SelfOOD(pl.LightningModule):
 
         # dispersion regularization
         prototypes = F.normalize(self.prototypes, dim=-1)  # (np, pd)
-        logits = prototypes @ prototypes.T / self.temp
+        logits = 2 * prototypes @ prototypes.T / (kappa_2 + kappa_1)
         logits.fill_diagonal_(float('-inf'))
         dispersion_reg = torch.logsumexp(logits, dim=1).mean()
         self.log(f'train/dispersion_reg', dispersion_reg, on_epoch=True, sync_dist=True)
 
         loss = bootstrap_loss + self.memax_weight * memax_reg + self.dispersion_weight * dispersion_reg
-        self.log(f'train/loss', loss, on_epoch=True, sync_dist=True)
+        self.log(f'train/loss', loss, on_epoch=True, sync_dist=True) 
 
         return loss
 
@@ -147,7 +153,7 @@ class SelfOOD(pl.LightningModule):
 
         ood_scores = {}
         with eval_mode(self):
-            logits = self.to_logits(images)
+            logits, _ = self.to_logits(images)
             probas = torch.softmax(logits, dim=-1)
             ood_scores['msp'] = -probas.max(dim=-1).values
             ood_scores['maxlogit'] = -logits.max(dim=-1).values
@@ -156,14 +162,14 @@ class SelfOOD(pl.LightningModule):
             ood_scores['truncated_entropy'] = entropy(probas, dim=-1, truncate=100)
 
         with eval_mode(self, enable_dropout=True):
-            ensemble_probas = torch.stack([torch.softmax(self.to_logits(images), dim=-1) for _ in range(len(views))])
+            ensemble_probas = torch.stack([torch.softmax(self.to_logits(images)[0], dim=-1) for _ in range(len(views))])
             (ood_scores['mean_msp'],
              ood_scores['mean_entropy'],
              ood_scores['mean_truncated_entropy'],
              ood_scores['expected_entropy'],
              ood_scores['bald_score']) = self.compute_ensemble_scores(ensemble_probas)
 
-            ensemble_probas = torch.stack([torch.softmax(self.to_logits(v), dim=-1) for v in views])
+            ensemble_probas = torch.stack([torch.softmax(self.to_logits(v)[0], dim=-1) for v in views])
             (ood_scores['mean_msp_on_views'],
              ood_scores['mean_entropy_on_views'],
              ood_scores['mean_truncated_entropy_on_views'],
