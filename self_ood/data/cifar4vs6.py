@@ -21,7 +21,7 @@ class CIFAR4vs6(CIFAR10DataModule):
     def __init__(
             self,
             data_dir: str,
-            batch_size: int = 256,
+            batch_size: int = 512,
             num_workers: int = 8,
             **simclr_views_params: Any
     ) -> None:
