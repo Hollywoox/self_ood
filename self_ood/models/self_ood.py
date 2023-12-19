@@ -62,7 +62,7 @@ class SelfOOD(pl.LightningModule):
         self.warmup_epochs = warmup_epochs
 
         self.ood_scores = [
-            'msp', 'maxlogit', 'energy', 'entropy', 'truncated_entropy',
+            'msp', 'maxlogit', 'energy', 'entropy', 'neg_kappa', 'truncated_entropy',
             'mean_msp', 'mean_entropy', 'mean_truncated_entropy', 'expected_entropy', 'bald_score',
             'mean_msp_on_views', 'mean_entropy_on_views', 'mean_truncated_entropy_on_views',
             'expected_entropy_on_views', 'bald_score_on_views'
@@ -85,10 +85,10 @@ class SelfOOD(pl.LightningModule):
     def to_logits(self, images):
         encoder_output = self.encoder(images)
         embeds = F.normalize(self.mlp(encoder_output), dim=-1)  # (n, pd)
-        kappa = torch.exp(self.mlp_temp(encoder_output))
+        kappa_inv = torch.exp(self.mlp_temp(encoder_output))
         prototypes = F.normalize(self.prototypes, dim=-1)  # (np, pd)
-        self.kappa_list.append(kappa)
-        return torch.matmul(embeds, prototypes.T) / kappa # (n, np)
+        self.kappa_list.append(kappa_inv)
+        return torch.matmul(embeds, prototypes.T) * kappa_inv # (n, np)
 
     def training_step(self, batch, batch_idx):
         (_, views_1, views_2), _ = batch
@@ -139,7 +139,9 @@ class SelfOOD(pl.LightningModule):
         prototypes = F.normalize(self.prototypes, dim=-1)  # (np, pd)
         kappa_1 = self.kappa_list[-2]
         kappa_2 = self.kappa_list[-1]
-        logits = 2 * prototypes @ prototypes.T / (kappa_1 + kappa_2)
+        self.kappa_list.pop()
+        self.kappa_list.pop()
+        logits = prototypes @ prototypes.T * (kappa_1 + kappa_2) / 2
         logits.fill_diagonal_(float('-inf'))
         dispersion_reg = torch.logsumexp(logits, dim=1).mean()
         self.log(f'train/dispersion_reg', dispersion_reg, on_epoch=True, sync_dist=True)
@@ -157,6 +159,8 @@ class SelfOOD(pl.LightningModule):
         with eval_mode(self):
             logits = self.to_logits(images)
             probas = torch.softmax(logits, dim=-1)
+            ood_scores['neg_kappa'] = -self.kappa_list[-1]
+            self.kappa_list.pop()
             ood_scores['msp'] = -probas.max(dim=-1).values
             ood_scores['maxlogit'] = -logits.max(dim=-1).values
             ood_scores['energy'] = -torch.logsumexp(logits, dim=-1)
