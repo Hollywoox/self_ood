@@ -57,6 +57,7 @@ class SelfOOD(pl.LightningModule):
         self.memax_weight = memax_weight
         self.dispersion_weight = dispersion_weight
         self.lr = lr
+        self.kappa_list = []
         self.weight_decay = weight_decay
         self.warmup_epochs = warmup_epochs
 
@@ -86,6 +87,7 @@ class SelfOOD(pl.LightningModule):
         embeds = F.normalize(self.mlp(encoder_output), dim=-1)  # (n, pd)
         kappa = torch.exp(self.mlp_temp(encoder_output))
         prototypes = F.normalize(self.prototypes, dim=-1)  # (np, pd)
+        self.kappa_list.append(kappa)
         return torch.matmul(embeds, prototypes.T) / kappa # (n, np)
 
     def training_step(self, batch, batch_idx):
@@ -135,7 +137,9 @@ class SelfOOD(pl.LightningModule):
 
         # dispersion regularization
         prototypes = F.normalize(self.prototypes, dim=-1)  # (np, pd)
-        logits = prototypes @ prototypes.T / self.temp
+        kappa_1 = self.kappa_list[-2]
+        kappa_2 = self.kappa_list[-1]
+        logits = 2 * prototypes @ prototypes.T / (kappa_1 + kappa_2)
         logits.fill_diagonal_(float('-inf'))
         dispersion_reg = torch.logsumexp(logits, dim=1).mean()
         self.log(f'train/dispersion_reg', dispersion_reg, on_epoch=True, sync_dist=True)
